@@ -348,11 +348,21 @@
 ;; Comanda principala                                                     ;;
 ;; --------------------------------------------------------------------- ;;
 
-(defun c:AUDITPLAN ( / ss n i ent e etype lay hnd grp grpnm grphnd obj
+(defun c:AUDITPLAN ( / *error* res nerr ss n i ent e etype lay hnd grp grpnm grphnd obj
                        fname f dwgname dwgpath defname line geo raw
                        counts key cnt minx miny maxx maxy p verts
                        rawmode ansr dimsty dimmeas d13 d14 dlf drot dper dpar tb sus
                        txt blkname atts a ae)
+
+  (defun *error* (msg)
+    (if f (close f))
+    (if (and msg (not (wcmatch (strcase msg) "*BREAK*,*CANCEL*,*QUIT*")))
+      (princ (strcat "\n*** Eroare: " msg))
+      (princ "\n*** Intrerupt.")
+    )
+    (if fname (princ (strcat "\n*** Ce s-a scris pana acum se afla in: " fname)))
+    (princ)
+  )
 
   (princ "\nSelectati entitatile pentru auditul profund (Enter = tot modelul): ")
   (setq ss (ssget))
@@ -407,7 +417,8 @@
             n        (sslength ss)
             *ap:sus* nil
             *ap:nodes* nil
-            counts   '())
+            counts   '()
+            nerr     0)
 
       ;; ---- antet ----------------------------------------------------------
       (ap:out f "=========================================================")
@@ -480,7 +491,8 @@
           (setq counts (cons (cons key 1) counts))
         )
 
-        (cond
+        (setq res (vl-catch-all-apply '(lambda ( ) 
+(cond
 
           ;; -------------------------------------------------- LINE
           ((= etype "LINE")
@@ -663,10 +675,18 @@
                              " CONTUR=[" (ap:ptlist (ap:allcodes 14 e)) "]"))
           )
         )
+        ) nil))
+        (if (vl-catch-all-error-p res)
+          (progn
+            (setq nerr (1+ nerr))
+            (setq geo (strcat "*** EROARE LA PRELUCRARE: "
+                              (vl-catch-all-error-message res))))
+        )
 
         ;; gabaritul selectiei
         (setq p (ap:dxf 10 e))
-        (if (and p (or (/= etype "HATCH") (/= (ap:pt p) "0.0000,0.0000")))
+        (if (and p (listp p) (numberp (car p)) (numberp (cadr p))
+                 (not (and (equal (car p) 0.0 1e-9) (equal (cadr p) 0.0 1e-9))))
           (progn
             (if (or (null minx) (< (car p) minx))  (setq minx (car p)))
             (if (or (null maxx) (> (car p) maxx))  (setq maxx (car p)))
@@ -679,13 +699,15 @@
         (setq raw "")
         (if rawmode
           (progn
-            (setq raw " | RAW={")
-            (foreach x e
-              (if (not (member (car x) '(-1 5 100 102 330 360 410 420 430 440)))
-                (setq raw (strcat raw (itoa (car x)) ":" (ap:str (cdr x)) " "))
+            (setq res (vl-catch-all-apply '(lambda ( )
+              (setq raw " | RAW={")
+              (foreach x e
+                (if (not (member (car x) '(-1 5 100 102 330 360 410 420 430 440)))
+                  (setq raw (strcat raw (itoa (car x)) ":" (ap:str (cdr x)) " "))
+                )
               )
-            )
-            (setq raw (strcat raw "}"))
+              (setq raw (strcat raw "}"))) nil))
+            (if (vl-catch-all-error-p res) (setq raw " | RAW={eroare}"))
           )
         )
 
@@ -699,13 +721,23 @@
                            raw))
         (ap:out f line)
         (setq i (1+ i))
-        (if (= 0 (rem i 100))
+        ;; inchidem si redeschidem fisierul periodic, ca datele sa ajunga
+        ;; efectiv pe disc si sa nu se piarda daca ceva se opreste pe parcurs
+        (if (and f (= 0 (rem i 25)))
+          (progn (close f) (setq f (open fname "a")))
+        )
+        (if (= 0 (rem i 50))
           (princ (strcat "\r  ... " (itoa i) " / " (itoa n) " entitati   "))
         )
       )
 
       ;; ---- noduri neunite --------------------------------------------------
-      (ap:checknodes)
+      (princ "\r  ... caut noduri neunite                      ")
+      (setq res (vl-catch-all-apply 'ap:checknodes nil))
+      (if (vl-catch-all-error-p res)
+        (ap:out f (strcat "*** Eroare la testul de noduri: "
+                          (vl-catch-all-error-message res)))
+      )
 
       ;; ---- recapitulare ----------------------------------------------------
       (ap:out f "---------------------------------------------------------")
@@ -717,6 +749,11 @@
         (ap:out f (strcat "[GABARIT PUNCTE DE INSERTIE] X: " (ap:r minx) " .. " (ap:r maxx)
                           "  |  Y: " (ap:r miny) " .. " (ap:r maxy)
                           "  |  DX=" (ap:r (- maxx minx)) " DY=" (ap:r (- maxy miny))))
+      )
+
+      (if (> nerr 0)
+        (ap:out f (strcat "[ATENTIE] " (itoa nerr)
+                          " entitati au dat eroare la prelucrare (vezi liniile cu *** EROARE)."))
       )
 
       (setq sus (reverse *ap:sus*))
@@ -733,7 +770,8 @@
       (ap:out f "---------------------------------------------------------")
       (ap:out f (strcat "SFARSIT AUDIT PROFUND - " (itoa n) " entitati."))
 
-      (if f (progn (close f) (princ (strcat "\n\n*** Raport salvat in: " fname " ***"))))
+      (if f (progn (close f) (setq f nil)
+                   (princ (strcat "\n\n*** Raport salvat in: " fname " ***"))))
 
       (if sus
         (progn

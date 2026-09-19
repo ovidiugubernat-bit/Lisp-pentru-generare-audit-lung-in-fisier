@@ -222,6 +222,7 @@
       *ap:gtol*  0.01     ;; toleranta fata de pas (mm)
       *ap:atol*  1e-7     ;; toleranta unghiulara pentru ortogonalitate (rad)
       *ap:jtol*  2.0      ;; sub distanta asta doua capete ar trebui sa coincida
+      *ap:lay*   "Fundatii,Centuri,Grinzi,Axe,Stalpi"  ;; layerele verificate
 )
 
 (defun ap:addsus (ent cat desc)
@@ -247,7 +248,7 @@
 ;; verifica un segment; lay = layerul, idx = indicele varfului (pt. mesaj)
 (defun ap:checkseg (ent lay p1 p2 idx / dev len)
   (setq len (distance p1 p2))
-  (if (> len 1e-9)
+  (if (and (> len 1e-9) (wcmatch (strcase lay) (strcase *ap:lay*)))
     (progn
       (setq *ap:nodes* (cons (list p1 ent lay) *ap:nodes*))
       (setq *ap:nodes* (cons (list p2 ent lay) *ap:nodes*))
@@ -351,7 +352,7 @@
 (defun c:AUDITPLAN ( / *error* res nerr ss n i ent e etype lay hnd grp grpnm grphnd obj
                        fname f dwgname dwgpath defname line geo raw
                        counts key cnt minx miny maxx maxy p verts
-                       rawmode ansr dimsty dimmeas d13 d14 dlf drot dper dpar tb sus
+                       rawmode ansr dimsty dimmeas dtyp d13 d14 dlf drot dper dpar tb sus
                        txt blkname atts a ae)
 
   (defun *error* (msg)
@@ -388,6 +389,10 @@
       (initget "Da Nu")
       (setq ansr (getkword "\nSa includ si toate perechile DXF brute (RAW)? [Da/Nu] <Nu>: "))
       (setq rawmode (= ansr "Da"))
+
+      (setq ansr (getstring T (strcat "\nCe layere verific pentru geometrie stramba (virgula intre ele, * = toate) <"
+                                     *ap:lay* ">: ")))
+      (if (/= ansr "") (setq *ap:lay* ansr))
 
       (initget 6)
       (setq p (getreal (strcat "\nPasul de rotunjime asteptat pentru lungimi, in mm <"
@@ -586,7 +591,11 @@
                  d14    (ap:dxf 14 e))
            (setq txt (strcat "masurat=" (ap:r dimmeas)
                              " override=[" (ap:str (ap:dxf 1 e)) "]"))
+           (setq dtyp (logand 7 (cond ((ap:dxf 70 e)) (0))))
            (setq geo (strcat "TIPCOTA=" (ap:str (ap:dxf 70 e))
+                             " (" (nth dtyp '("liniara rotita" "aliniata" "unghiulara"
+                                              "diametru" "raza" "unghiulara 3p"
+                                              "ordonata" "?")) ")"
                              " PLINIE=" (ap:pt (ap:dxf 10 e))
                              " PTEXT=" (ap:pt (ap:dxf 11 e))
                              " P12=" (ap:pt (ap:dxf 12 e))
@@ -603,33 +612,41 @@
                              " {" (ap:dimstyleinfo dimsty) "}"
                              (ap:xdata ent)))
            ;; cote suspecte
-           (if (and d13 d14)
-             (progn
-               ;; abaterea perpendiculara fata de directia cotei: cat de "stramb"
-               ;; stau cele doua puncte de definitie unul fata de celalalt
-               (setq dlf  (cond ((cdr (assoc 144 (tblsearch "dimstyle" dimsty)))) (1.0))
-                     drot (cond ((ap:dxf 50 e)) (0.0))
-                     dper (abs (- (* (- (car d14) (car d13)) (sin drot))
-                                  (* (- (cadr d14) (cadr d13)) (cos drot))))
-                     dpar (abs (+ (* (- (car d14) (car d13)) (cos drot))
-                                  (* (- (cadr d14) (cadr d13)) (sin drot)))))
-               (setq geo (strcat geo " PERP=" (ap:r dper) " PARAL=" (ap:r dpar)))
-               (if (> dper *ap:gtol*)
-                 (ap:addsus ent "COTA STRAMBA"
-                   (strcat "punctele de definitie sunt decalate cu "
-                           (rtos dper 2 4) " mm perpendicular pe directia cotei ("
-                           (ap:pt d13) " - " (ap:pt d14) ")"))
-               )
-               ;; valoarea reala masurata, adusa in mm prin DIMLFAC
-               (if (and dimmeas (> dlf 0.0))
-                 (if (ap:offgrid (/ dimmeas dlf))
-                   (ap:addsus ent "COTA NEROTUNDA"
-                     (strcat "valoare reala " (rtos (/ dimmeas dlf) 2 4)
-                             " mm (nu e multiplu de " (rtos *ap:grid* 2 2)
-                             " mm); afisat: " (ap:r dimmeas)
-                             ", DIMLFAC=" (ap:r dlf) ", stil " dimsty))
-                 )
-               )
+           ;; verificarile se aplica numai cotelor de lungime; la cele
+           ;; unghiulare Measurement e un unghi in radiani, iar la raza/diametru
+           ;; o raza - nu au ce cauta intr-un test de rotunjime liniara
+           (cond
+             ((member dtyp '(2 5))
+              (setq geo (strcat geo " UNGHI_GRADE="
+                                (if dimmeas (ap:ang dimmeas) "")))
+             )
+             ((member dtyp '(3 4))
+              (setq geo (strcat geo " RAZA_DIAM_MM="
+                                (if dimmeas (ap:r (/ dimmeas (ap:dimlfac dimsty))) "")))
+             )
+             (T
+              (if (and d13 d14)
+                (progn
+                  (setq dlf  (ap:dimlfac dimsty)
+                        drot (cond ((ap:dxf 50 e)) (0.0))
+                        dper (abs (- (* (- (car d14) (car d13)) (sin drot))
+                                     (* (- (cadr d14) (cadr d13)) (cos drot))))
+                        dpar (abs (+ (* (- (car d14) (car d13)) (cos drot))
+                                     (* (- (cadr d14) (cadr d13)) (sin drot)))))
+                  (setq geo (strcat geo " PERP=" (ap:r dper) " PARAL=" (ap:r dpar)))
+                )
+              )
+              (if dimmeas
+                (if (ap:offgrid (/ dimmeas (ap:dimlfac dimsty)))
+                  (ap:addsus ent "COTA NEROTUNDA"
+                    (strcat "valoare reala "
+                            (rtos (/ dimmeas (ap:dimlfac dimsty)) 2 4)
+                            " mm (nu e multiplu de " (rtos *ap:grid* 2 2)
+                            " mm); afisat: " (ap:r dimmeas)
+                            ", DIMLFAC=" (ap:r (ap:dimlfac dimsty))
+                            ", stil " dimsty))
+                )
+              )
              )
            )
           )
@@ -644,7 +661,7 @@
                              " SCARA=" (ap:r (ap:dxf 41 e))
                              " UNGHI=" (ap:ang (ap:dxf 52 e))
                              " ARIE=" (ap:r (ap:get obj 'Area))
-                             " SEED=" (ap:ptlist (ap:allcodes 98 e))))
+                             " NRSEED=" (ap:str (ap:dxf 98 e))))
           )
 
           ;; -------------------------------------------------- INSERT

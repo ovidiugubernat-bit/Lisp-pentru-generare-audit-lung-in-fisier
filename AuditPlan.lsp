@@ -272,6 +272,13 @@
 ;; capete apropiate dar neunite (cauza tipica a cotelor ne-rotunde)
 ;; se sorteaza dupa X si se compara doar in fereastra de +/- *ap:jtol*
 (defun ap:checknodes ( / l a b d rest)
+  (if (> (length *ap:nodes*) 20000)
+    (progn
+      (princ (strcat "\n(Prea multe noduri ("
+                     (itoa (length *ap:nodes*))
+                     ") - testul de noduri neunite a fost sarit.)"))
+      (setq *ap:nodes* nil))
+  )
   (setq l (vl-sort *ap:nodes*
                    '(lambda (u v) (< (car (car u)) (car (car v))))))
   (while l
@@ -344,15 +351,28 @@
 (defun c:AUDITPLAN ( / ss n i ent e etype lay hnd grp grpnm grphnd obj
                        fname f dwgname dwgpath defname line geo raw
                        counts key cnt minx miny maxx maxy p verts
-                       rawmode ansr dimsty dimmeas d13 d14 tb sus
+                       rawmode ansr dimsty dimmeas d13 d14 dlf drot dper dpar tb sus
                        txt blkname atts a ae)
 
   (princ "\nSelectati entitatile pentru auditul profund (Enter = tot modelul): ")
   (setq ss (ssget))
   (if (null ss) (setq ss (ssget "_X" '((410 . "Model")))))
 
+  ;; plasa de siguranta: pe un desen intreg auditul dureaza enorm si nu ajuta
+  (if (and ss (> (sslength ss) 5000))
+    (progn
+      (initget "Da Nu")
+      (if (= "Nu" (getkword (strcat "\n*** Ati selectat " (itoa (sslength ss))
+                    " entitati (probabil tot desenul). Auditul profund e gandit"
+                    " pentru un singur plan - selectati cu o fereastra doar zona"
+                    " care va intereseaza.\n    Continuati totusi? [Da/Nu] <Nu>: ")))
+        (setq ss nil)
+      )
+    )
+  )
+
   (if (null ss)
-    (progn (princ "\nNimic selectat.") (princ))
+    (progn (princ "\nRenuntat.") (princ))
     (progn
 
       (initget "Da Nu")
@@ -570,19 +590,33 @@
                              " DIST13_14=" (if (and d13 d14) (ap:r (distance d13 d14)) "-")
                              " {" (ap:dimstyleinfo dimsty) "}"
                              (ap:xdata ent)))
-           ;; cote ne-rotunde
+           ;; cote suspecte
            (if (and d13 d14)
              (progn
-               (if (and (ap:orthodev d13 d14) (> (ap:orthodev d13 d14) *ap:atol*))
-                 (ap:addsus ent "COTA OBLICA"
-                   (strcat "punctele de definitie nu sunt aliniate ortogonal: "
-                           (ap:pt d13) " - " (ap:pt d14)))
+               ;; abaterea perpendiculara fata de directia cotei: cat de "stramb"
+               ;; stau cele doua puncte de definitie unul fata de celalalt
+               (setq dlf  (cond ((cdr (assoc 144 (tblsearch "dimstyle" dimsty)))) (1.0))
+                     drot (cond ((ap:dxf 50 e)) (0.0))
+                     dper (abs (- (* (- (car d14) (car d13)) (sin drot))
+                                  (* (- (cadr d14) (cadr d13)) (cos drot))))
+                     dpar (abs (+ (* (- (car d14) (car d13)) (cos drot))
+                                  (* (- (cadr d14) (cadr d13)) (sin drot)))))
+               (setq geo (strcat geo " PERP=" (ap:r dper) " PARAL=" (ap:r dpar)))
+               (if (> dper *ap:gtol*)
+                 (ap:addsus ent "COTA STRAMBA"
+                   (strcat "punctele de definitie sunt decalate cu "
+                           (rtos dper 2 4) " mm perpendicular pe directia cotei ("
+                           (ap:pt d13) " - " (ap:pt d14) ")"))
                )
-               (if (ap:offgrid (distance d13 d14))
-                 (ap:addsus ent "COTA NEROTUNDA"
-                   (strcat "distanta reala intre punctele de definitie = "
-                           (rtos (distance d13 d14) 2 4) " mm (nu e multiplu de "
-                           (rtos *ap:grid* 2 2) " mm); afisat: " (ap:r dimmeas)))
+               ;; valoarea reala masurata, adusa in mm prin DIMLFAC
+               (if (and dimmeas (> dlf 0.0))
+                 (if (ap:offgrid (/ dimmeas dlf))
+                   (ap:addsus ent "COTA NEROTUNDA"
+                     (strcat "valoare reala " (rtos (/ dimmeas dlf) 2 4)
+                             " mm (nu e multiplu de " (rtos *ap:grid* 2 2)
+                             " mm); afisat: " (ap:r dimmeas)
+                             ", DIMLFAC=" (ap:r dlf) ", stil " dimsty))
+                 )
                )
              )
            )
@@ -665,6 +699,9 @@
                            raw))
         (ap:out f line)
         (setq i (1+ i))
+        (if (= 0 (rem i 100))
+          (princ (strcat "\r  ... " (itoa i) " / " (itoa n) " entitati   "))
+        )
       )
 
       ;; ---- noduri neunite --------------------------------------------------
